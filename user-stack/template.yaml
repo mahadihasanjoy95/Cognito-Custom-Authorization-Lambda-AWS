@@ -1,0 +1,228 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  user-stack
+
+  Sample SAM Template for user-stack
+Parameters:
+  WaterTable:
+    Type: String
+  Stage:
+    Type: String
+    Default: dev
+  ProjectName:
+    Type: String
+    Description: 'Name of the project'
+    Default: 'waterBilling'
+Metadata:
+ AWS::CloudFormation::Interface:
+  ParameterGroups:
+   - Label: {default: 'Optional parameters'}
+     Parameters:
+      - ProjectName
+
+# More info about Globals: https://github.com/awslabs/serverless-application-model/blob/master/docs/globals.rst
+Globals:
+  Function:
+    Timeout: 3
+    MemorySize: 128
+#    Layers:
+#      - !Ref PythonDepLayer
+    CodeUri: ./cognito_serverless_platform
+    Tracing: Active
+    Environment:
+      Variables:
+        STAGE: !Ref Stage
+        CongnitoPoolId: !Ref CognitoUserPool
+        CongnitoPoolClientId: !Ref CognitoUserPoolClient
+
+  Api:
+    TracingEnabled: true
+Resources:
+  CreateUserFunc:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: lamdas/
+      Handler: createUser.lambda_handler
+      Runtime: python3.9
+      Events:
+        CreateUser:
+          Type: Api
+          Properties:
+            Path: /user/create
+            RestApiId: !Ref CognitoPlatformApi
+            Method: post
+            Auth:
+              Authorizer: NONE
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref WaterTable
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - "cognito-idp:AdminCreateUser"
+                - "cognito-idp:AdminSetUserPassword"
+                - "cognito-idp:CreateGroup"
+                - "cognito-idp:AdminAddUserToGroup"
+              Resource: '*'
+  LoginUserFunc:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: lamdas/
+      Handler: loginUser.lambda_handler
+      Runtime: python3.9
+      Events:
+        LoginUser:
+          Type: Api
+          Properties:
+            Path: /user/login
+            RestApiId: !Ref CognitoPlatformApi
+            Method: post
+            Auth:
+              Authorizer: NONE
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - "cognito-idp:AdminCreateUser"
+                - "cognito-idp:AdminSetUserPassword"
+              Resource: '*'
+  GetUserFunc:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: lamdas/
+      Handler: getUser.lambda_handler
+      Runtime: python3.9
+      Events:
+        GetUsers:
+          Type: Api
+          Properties:
+            Path: /user/get
+            RestApiId: !Ref MyCustomApi
+            Method: get
+
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref WaterTable
+        - arn:aws:iam::534678543881:policy/service-role/Cognito-1615957859151
+
+  s3TriggerFunc:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: lamdas/
+      Handler: s3Trigger.lambda_handler
+      Runtime: python3.9
+      Events:
+        S3Create:
+          Type: Api
+          Properties:
+            Path: /s3
+            Method: get
+        S3Event:
+          Type: S3
+          Properties:
+            Bucket: !Ref myBucket
+            Events: s3:ObjectCreated:*
+  SqsTriggerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: lamdas/
+      Handler: SqsTrigger.lambda_handler
+      Runtime: python3.9
+      Events:
+        SqsTrigger:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt SqsWaterBillingNew.Arn
+  CognitoUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub ${Stage}-Cognito-User-Pool
+      EmailConfiguration:
+        EmailSendingAccount: DEVELOPER
+        From: "Water Development< niloy369@gmail.com >"
+        SourceArn: "arn:aws:ses:us-west-2:534678543881:identity/niloy369@gmail.com"
+
+  CognitoUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      UserPoolId: !Ref CognitoUserPool
+      ClientName: !Sub ${Stage}-CognitoUserPoolClient
+      ExplicitAuthFlows:
+          - USER_PASSWORD_AUTH
+  BasicAuthorizeFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: lamdas/
+      Handler: authorizeLambda.lambda_handler
+      Runtime: python3.9
+  MyCustomApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: dev
+      Auth:
+        DefaultAuthorizer: MyLambdaTokenAuthorizer
+        Authorizers:
+          MyLambdaTokenAuthorizer:
+            FunctionArn: !GetAtt BasicAuthorizeFunction.Arn
+  CognitoPlatformApi:
+    Type: AWS::Serverless::Api
+    DependsOn: CognitoUserPoolClient
+    Properties:
+      Name: !Sub "${Stage}-Cognito-Platform-Api-Gateway"
+      StageName: !Ref Stage
+      Auth:
+        DefaultAuthorizer: CustomCognitoAuthorizer
+        Authorizers:
+          CustomCognitoAuthorizer:
+            UserPoolArn: !GetAtt CognitoUserPool.Arn
+
+  SnsWaterBillingNew:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub '${ProjectName}'
+      Subscription:
+        - Protocol: sqs
+          Endpoint: !GetAtt SqsWaterBillingNew.Arn
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}'
+  SqsWaterBillingNew:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub '${ProjectName}'
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}'
+# Policy allows SNS to publish to this SQS queue
+  SnsToSqsPolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: "Allow SNS publish to SQS"
+            Effect: Allow
+            Principal:
+              Service: "sns.amazonaws.com"
+            Resource: !GetAtt SqsWaterBillingNew.Arn
+            Action: SQS:SendMessage
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !Ref SnsWaterBillingNew
+      Queues:
+        - Ref: SqsWaterBillingNew
+
+#  PythonDepLayer:
+#    Type: AWS::Serverless::LayerVersion
+#    Properties:
+#      LayerName: !Sub "${Stage}-cognito-serverless-platform-dep-layer"
+#      CompatibleRuntimes:
+#        - python3.8
+#      ContentUri: ./.build/dependencies
+#      RetentionPolicy: Delete
+
+  myBucket:
+    Type: 'AWS::S3::Bucket'
